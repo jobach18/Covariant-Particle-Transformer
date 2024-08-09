@@ -13,7 +13,6 @@ class CovariantAttention():
 				 heads: int = 1, gate: bool = True,
 				 dropout: float = 0.,
 				 bias: bool = True, d_space=3, update_p=False, uniform_attention=False, **kwargs):
-		super().__init__(node_dim=0, **kwargs)
 
 		self.hidden_dim = hidden_dim
 		self.heads = heads
@@ -51,7 +50,7 @@ class CovariantAttention():
 			in_feat = x
 
 		# propagate_type: (x: PairTensor, edge_attr: OptTensor)
-		m = self.propagate(edge_index, x=in_feat, edge_attr=edge_attr, size=None) # aggreagated messgaes 
+		m = self.calc_attention(x=in_feat) # aggreagated messgaes 
 		m = m.contiguous().view(-1, self.hidden_dim) # (|E|, D)
         x = in_feat[1] # initial target feat
         p = None
@@ -105,19 +104,17 @@ class CovariantAttention():
 		p21 = torch.cat([eta21.view(-1, 1), phi21], dim=-1)
 		return p21
 
-	def message(self, x_i: Tensor, x_j: Tensor, 
-				index: Tensor, ptr: OptTensor,
-				size_i: Optional[int]) -> Tensor:
+	def calc_attention(self, x_i) -> Tensor:
 
 		query = self.lin_query(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
-        key = self.lin_key(x_j).view(-1, self.heads, self.hidden_dim // self.heads)
-        value = self.lin_value(x_j).view(-1, self.heads, self.hidden_dim // self.heads)
+        key = self.lin_key(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
+        value = self.lin_value(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
 
 		if not self.uniform_attention:
 			alpha = (query * key).sum(dim=-1) / math.sqrt(self.hidden_dim // self.heads) + edge_bias
 		else:
 			alpha = torch.zeros(query.shape[0], query.shape[1]).to(query.device)
-		alpha = softmax(alpha, index, ptr, size_i)
+		alpha = softmax(alpha, dim=-1)
 		self._alpha = alpha
 
 		m = value * alpha.view(-1, self.heads, 1) # invariant messages (|E|, H, D // H)
