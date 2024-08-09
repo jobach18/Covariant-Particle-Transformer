@@ -86,22 +86,20 @@ class ColumnarCovariantTopFormer(BaseModel):
 		return loss, loss_info
 	
 	def forward(self, input, inference=False, force_correct_num_pred=False):
-		graph = input['graph']
-		x, edge_index, batch = graph.x.to(self.device), graph.edge_index.to(self.device), graph.batch.to(self.device)
+		x = input.to(self.device)
 		batch_size = batch.max() + 1
 		############ encoder ############
-		# process input graph
 		# assume x = [pT, eta, phi, m, ...one-hot...]
 		p, x = x[:, 1:3], torch.cat([x[:, 0].unsqueeze(-1), x[:, 3:]], dim=-1) 
 		x[:, 0] /= 100 # scale down pT
 		x[:, 1] /= 10 # scale down mass
 		# convert phi into unit-vector representation
 		p = torch.stack([p[:, 0], p[:, 1].cos(), p[:, 1].sin()], dim=-1) # (:, 3)
-		x_source, p_source = self.invariant_encoder(x, edge_index, p=p, edge_attr=None) # p_source is not updated
+		x_source, p_source = self.invariant_encoder(x, p=p) # p_source is not updated
 		# print(f'encoded source: {x_source.abs().mean()}\n', x_source[:, -5:]) # __debug__
 
 		# global attn pooling to initialize lstm hidden state
-		h = self.pool(x_source, batch) # event summary: single vector
+		h = self.pool(x_source) # event summary: single vector
 		# print(f'pool:{h.abs().mean()}\n', h[:, -5:]) # __debug__
 		
 		# logits for number of tops prediction
@@ -122,11 +120,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 			num_pred = torch.argmax(count_logits, axis=1) + 1
 
 		############ decoder ############
-		# construct edges between inputs, outputs, and within outputs
-		self_attn_edges, cross_attn_edges = self.get_decoder_edges(graph, num_pred, inference)
 
-		# cache edges between inputs and outputs for attention interpretation
-		self._cross_attn_edges = cross_attn_edges
 
 		# compute batch_out with invalid output nodes removed
 		batch_out = torch.arange(0, batch_size).unsqueeze(-1).repeat(1, self.max_num_output).view(-1).to(x_source.device)
@@ -135,18 +129,14 @@ class ColumnarCovariantTopFormer(BaseModel):
 		valid_out = (out_index < num_pred).reshape(-1)
 
 		# pre-decoder cross attntion
-		x_out, _ = self.pre_decoder(x_source, x_out, self_attn_edges, None, cross_attn_edges, None) # update x_out, p_out == None because pre_decoder is non-geometric
+		x_out, _ = self.pre_decoder(x_source, x_out) # update x_out, p_out == None because pre_decoder is non-geometric
 		# retrieve invariant attention
 		alpha_init = self.pre_decoder.get_alpha() # (|E|, L=1, H)
 		alpha_init = alpha_init.mean(-1).mean(-1) # average over layer and heads
 
-		# initialize p_out
-		senders = cross_attn_edges[0, :]
-		receivers = cross_attn_edges[1, :]
 		# weight p_source[i, j] by a_[i, j]
-		p_out = p_source[senders] * alpha_init.unsqueeze(-1) # (|E|, d_space) * (|E|, 1) -> (|E|, d_space)
+		p_out = p_source * alpha_init.unsqueeze(-1) # (|E|, d_space) * (|E|, 1) -> (|E|, d_space)
 		# sum over source index
-		p_out = scatter_add(p_out, receivers, dim=0, dim_size=batch_size*self.max_num_output) # covariant
 		self.y_intermediates = []
 		y_init = utils.format_prediction(x_out[:, :2], p_out)
 		self.y_intermediates.append(y_init)
@@ -155,16 +145,11 @@ class ColumnarCovariantTopFormer(BaseModel):
 		p_out = self.normalize_phi_vec(p_out)
 		# perform decoder self & cross attention
 		if self.num_convs[1] > 0: # avoid unintended compuation when decoder is supoosed to not exist
-			x_out, p_out = self.covariant_decoder(x_source, x_out, self_attn_edges, None, cross_attn_edges, None, p_source=p_source, p_out=p_out)
+			x_out, p_out = self.covariant_decoder(x_source, x_out,  p_source=p_source, p_out=p_out)
 			self.y_intermediates.extend(self.covariant_decoder.y_intermediates)
 		# print(f'decoded p: {p_out.abs().mean()}\n', p_out) # __debug__
 		# print(f'decoded x: {x_out.abs().mean()}\n', x_out.abs().mean(-1)) # __debug__
 		# break exact covariance with another decoder supplied with absolute eta info
-		if self.break_eta_covariance:
-			x_out = self.augment_linear_out(torch.cat([x_out, p_out[:, 0].unsqueeze(-1)], dim=-1))
-			x_source = self.augment_linear_source(torch.cat([x_source, p_source[:, 0].unsqueeze(-1)], dim=-1))
-			x_out, p_out = self.post_decoder(x_source, x_out, self_attn_edges, None, cross_attn_edges, None, p_source=p_source, p_out=p_out)
-			self.y_intermediates.extend(self.post_decoder.y_intermediates)
 		# scale outputs to speed up initial optimization
 		pt_m_pred = torch.FloatTensor([100, 5]).to(self.device) * self.out_linear(x_out)
 		eta_phi_pred = p_out
@@ -183,6 +168,9 @@ class ColumnarCovariantTopFormer(BaseModel):
 		return torch.cat([p[:, 0].unsqueeze(-1), phi_vec], dim=-1)
 	
 	def test_covariance(self, input, sigma=1):
+		"""
+		TODO REWRITE INTO NON GEOMETRIC
+		"""
 		with torch.no_grad():
 			batch = input['graph'].batch.to(self.device)
 			batch_size = batch.max() + 1
@@ -295,14 +283,8 @@ class ColumnarCovariantTopFormer(BaseModel):
 		acc = (num_pred == num_target).float().mean()
 
 		# norm penalty for phi-messages
-		if self.geometric:
-			if self.num_convs[1] > 0:
-				phi_message_norm = self.covariant_decoder.get_phi_message_norm()
-				# no loss from the pre-decoder because there's nothing you can do with attention there
-				unit_norm_loss = 0.01 * (phi_message_norm - 1).abs().mean()
-			else:
-				unit_norm_loss = 0 * kinematics_loss
-			loss = loss + unit_norm_loss
+		unit_norm_loss = 0 * kinematics_loss
+		loss = loss + unit_norm_loss
 		loss_info = {
 			'loss': loss.item(),
 			'count_loss': count_loss.item(),
@@ -381,35 +363,6 @@ class ColumnarCovariantTopFormer(BaseModel):
 		y_masked = mask * y + (1 - mask) * ghost_value
 		return y_masked
 
-	def get_decoder_edges(self, graph, num_pred, inference):	
-		if not inference: # During training, edges were precomputed in the dataset and batched as rectangular tensors to speed up data loading
-			# some preprocessing to get the shapes right
-			cross_attn_edges, self_attn_edges, n_x, batch_size = graph.cross_attn_edges, graph.self_attn_edges, graph.n_x, graph.batch.max() + 1
-			cross_attn_edges, self_attn_edges, n_x = cross_attn_edges.to(self.device), self_attn_edges.to(self.device), n_x.to(self.device)
-			cross_attn_edges = cross_attn_edges.reshape([-1, 2, graph.max_cross_attn_edges[0]])
-			self_attn_edges = self_attn_edges.reshape([-1, 2, graph.max_self_attn_edges[0]])
-			source_index = torch.arange(batch_size).to(self.device)
-			source_offset_ = torch.cumsum(n_x, dim=0).to(self.device)
-			source_offset = torch.cat([torch.zeros(1).to(self.device), source_offset_[:-1]]).long()
-			output_offset = torch.arange(0, self.max_num_output * batch_size, self.max_num_output).long().to(self.device)
-			# apply source offset
-			cross_attn_edges[:, 0, :] = cross_attn_edges[:, 0, :] + source_offset.unsqueeze(-1)
-			# apply output offset
-			cross_attn_edges[:, 1, :] = cross_attn_edges[:, 1, :] + output_offset.unsqueeze(-1)
-			# apply output offset
-			self_attn_edges = self_attn_edges + output_offset.view(-1, 1, 1)
-			# remove padding
-			self_attn_edges = self.get_valid_edges_indices(self_attn_edges)
-			cross_attn_edges = self.get_valid_edges_indices(cross_attn_edges)
-		if inference: # edges are constructed on the fly because num_pred varies depending on the model
-			graph = utils.get_xy_graph(graph, num_pred, self.max_num_output)
-			cross_attn_edges, self_attn_edges = graph.edge_index_cross, graph.edge_index_out
-		return self_attn_edges, cross_attn_edges
-
-	def get_valid_edges_indices(self, stacked_edge_index):
-		edge_index = stacked_edge_index.swapaxes(-1, -2).reshape(-1, 2)
-		keep = edge_index[:, 0] >= 0
-		return edge_index[keep].t()
 
 	def run_inference(self, test_loader, max_num_batch=float('inf'), version='nominal', force_correct_num_pred=False):
 		self.eval()
@@ -451,7 +404,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 				####### Get inputs #######
 				input = data['x']
 				input = {k: v.to(self.device) for k, v in input.items()}
-				input_features = input['graph'].x
+				input_features = input
 				is_jet = (input_features[:, 4] + input_features[:, 5]) > 0 # bjet or non-bjet
 				####### Prediction #######
 				# Unless force_correct_num_pred == True, the model predicts number of outputs in inference mode
@@ -470,27 +423,6 @@ class ColumnarCovariantTopFormer(BaseModel):
 					# Match by assuming there are num_target predictions and targets
 					y_pred[count_correct], opt_perm = self.match(y_pred[count_correct], y_target[count_correct], num_target[count_correct])
 
-					# permute reco_triplet_index so that triplet attention is computed correctly for each predicetd top
-					reco_triplet_index = data['reco_triplet_indices'].view(-1, self.max_num_output, 3).to(self.device) # (B, N, 3)
-					reco_triplet_index[count_correct] = self.permute(reco_triplet_index[count_correct], opt_perm, inverse=True)
-					# Get the top-3 attention index for each target in this batch, placeholder targets and targets with less than 3 input objects return [-2, -2, -2].
-					if hasattr(self, '_cross_attn_edges'):
-						top_attention_index, triplet_attention, kl, n_object = self.get_attention_info(reco_triplet_index, is_jet) # (*, 3), (*), (*)
-						top_attention_index = top_attention_index.view(-1, self.max_num_output, 3) # (B, N, 3)
-					else:
-						top_attention_index = (reco_triplet_index * 0).to(self.device)
-					# match prediction to truth instead of the other way around
-					reco_triplet_index = data['reco_triplet_indices'].view(-1, self.max_num_output, 3).to(self.device)
-					top_attention_index[count_correct] = self.permute(top_attention_index[count_correct], opt_perm)
-					triplet_attention = triplet_attention.view(-1, self.max_num_output, 1).to(self.device)
-					kl = kl.view(-1, self.max_num_output, 1).to(self.device)
-					n_object = n_object.view(-1, self.max_num_output, 1).to(self.device)
-					kl[count_correct] = self.permute(kl[count_correct], opt_perm)
-					n_object[count_correct] = self.permute(n_object.view(-1, self.max_num_output, 1)[count_correct], opt_perm)
-					triplet_attention[count_correct] = self.permute(triplet_attention.view(-1, self.max_num_output, 1)[count_correct], opt_perm)
-					kl = kl.view(-1)
-					n_object = n_object.view(-1)
-					triplet_attention = triplet_attention.view(-1)
 
 				# Compute prediction errors on matched events
 				pred_error = torch.norm(self.loss_scale_factor * (self.reparameterize_pred(y_pred) - self.reparameterize_target(y_target)), p=2, dim=-1) / self.loss_scale_factor.shape[-1]
@@ -503,22 +435,10 @@ class ColumnarCovariantTopFormer(BaseModel):
 					count_correct_cum += count_correct.sum()
 				
 				####### Get additional info #######
-				num_graphs = input['graph'].num_graphs
 				y_reco = data['reco_top'].float().to(self.device)
 				num_target = data['num_target'].long().to(self.device)
-				total += num_graphs
 				# count realistic bjets
 				n_bj = scatter_add(input['graph'].x[:, 5], input['graph'].batch, dim=0)
-				####### Get GNN reco info #######
-				y_gnn_reco = data['gnn_reco_top'].float().to(self.device)
-				gnn_predicted = data['gnn_predicted'].long().to(self.device)
-				# repeat gnn reco pred and we'll only take the truth-matched one in the end
-				not_predicted = gnn_predicted[:, 1].logical_not()
-				y_gnn_reco[not_predicted, 1] = y_gnn_reco[not_predicted, 0] #(1 - gnn_predicted[:, 1]).unsqueeze(-1) * y_gnn_reco[:, 0, :] + gnn_predicted[:, 1].unsqueeze(-1)  * y_gnn_reco[:, 1, :]
-				# do dR matching between gnn reco and truth
-				_, gnn_reco_perm = self.match(self.angle_to_vec(y_gnn_reco), y_target, num_target)
-				y_gnn_reco = self.permute(y_gnn_reco, gnn_reco_perm).squeeze(0)
-
 				####### Convert vectorized-phi to angle #######
 				y_target = self.vec_to_angle_target(y_target)
 				y_pred = self.vec_to_angle_pred(y_pred)
@@ -527,22 +447,15 @@ class ColumnarCovariantTopFormer(BaseModel):
 				Y_target.extend(y_target)
 				Y_reco.extend(y_reco)
 				Y_pred.extend(y_pred)
-				Y_gnn_reco.extend(y_gnn_reco)
 				N_bj.extend(n_bj)
 				N_target.extend(num_target)
 				N_pred.extend(num_pred)
 				probs.extend(prob)
 				truth_matched.extend(data['truth_matched'])
-				triplet_attn.extend(triplet_attention)
-				KL.extend(kl.tolist())
-				N_object.extend(n_object.tolist())
 				pred_errors.extend(pred_error.tolist())
 				identified.extend(data['identified'])
 				W_decay_pid.extend(data['W_decay_pid'])
 				info.extend(data['info'])
-				top_attention_indices.extend(top_attention_index)
-				reco_triplet_indices.extend(reco_triplet_index)
-				attention_matched.extend([set(a.tolist()) == set(b.tolist()) for a, b in zip(top_attention_index.view(-1, 3), reco_triplet_index.view(-1, 3))])
 		
 		####### Averaging #######
 		mean_kinematics_diff_norm_l1 = kinematics_diff_norm_l1_cum / count_correct_cum
@@ -557,8 +470,6 @@ class ColumnarCovariantTopFormer(BaseModel):
 		Y_target = torch.cat(Y_target, dim=0)
 		Y_reco = torch.cat(Y_reco, dim=0)
 		Y_pred = torch.cat(Y_pred, dim=0)
-		Y_gnn_reco = torch.cat(Y_gnn_reco, dim=0)
-		gnn_reco_matched = torch.all(Y_reco == Y_gnn_reco, dim=-1)
 		y_dim = Y_target.shape[-1]
 		Y_target = Y_target.reshape(-1, y_dim)
 		Y_pred = Y_pred.reshape(-1, y_dim)
@@ -567,13 +478,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 		identified = torch.cat(identified, dim=0).reshape(-1)
 		W_decay_pid = torch.cat(W_decay_pid, dim=0).reshape(-1)
 		info = torch.stack(info, dim=0)
-		top_attention_indices = torch.stack(top_attention_indices, dim=0)
-		triplet_attn = torch.FloatTensor(triplet_attn)
-		KL = torch.FloatTensor(KL)
-		N_object = torch.FloatTensor(N_object)
 		pred_errors = torch.FloatTensor(pred_errors)
-		reco_triplet_indices = torch.stack(reco_triplet_indices, dim=0)
-		attention_matched = torch.BoolTensor(attention_matched)
 		test_result_dict = {
 							'probs': probs.detach().cpu().numpy(),
 							'N_bj': N_bj.detach().cpu().numpy(),
@@ -582,7 +487,6 @@ class ColumnarCovariantTopFormer(BaseModel):
 							'y_pred': Y_pred.detach().cpu().numpy(),
 							'y_target': Y_target.detach().cpu().numpy(),
 							'y_reco': Y_reco.detach().cpu().numpy(),
-							'y_gnn_reco': Y_gnn_reco.detach().cpu().numpy(),
 							'mean_kinematics_diff_norm_l1': mean_kinematics_diff_norm_l1.detach().cpu().numpy(),
 							'mean_kinematics_diff_norm_l2': mean_kinematics_diff_norm_l2.detach().cpu().numpy(),
 							'count_acc': count_acc.detach().cpu().numpy(),
@@ -603,45 +507,6 @@ class ColumnarCovariantTopFormer(BaseModel):
 		self.logger.info(f"Saved test result at {os.path.join(self.output_dir, f'test_result_{version}.pt')}")
 		return test_result_dict
 
-	def get_attention_info(self, reco_triplet_index, mask=None):
-		# get the index of input objects with top-3 attention scores for each output
-		# mask: if not None, 1 for valid, 0 for invalid nodes
-		reco_triplet_index = reco_triplet_index.view(-1, 3)
-		if self.num_convs[1] == 0: # avoid unintended compuation when decoder is supoosed to not exist
-			return -2 * torch.ones(self._cross_attn_edges[1].max() + 1, 3).to(self.device)
-		cross_attn_edges = self._cross_attn_edges
-		if mask is not None:
-			# remove edges (i, j) where mask[i] == 0
-			edge_mask = mask[cross_attn_edges[0]] == 1 # (|E|,)
-		else:
-			edge_mask = torch.ones(cross_attn_edges[0].shape).to(self.device) == 1
-		a = self.get_alpha() # (|E|, L, H)
-		a = a.mean(-1).mean(-1) # avg over decoder layers and heads
-		index_top = []
-		triplet_a = []
-		kl = []
-		n_object = []
-		for j in range(cross_attn_edges[1].max() + 1):
-			goes_to_j = (cross_attn_edges[1] == j) & edge_mask
-			n_obj = (goes_to_j).sum()
-			n_object.append(n_obj)
-			a_j = a[goes_to_j]
-			kl.append(n_obj.log() + (a_j * a_j.log()).sum())
-			if 3 > n_obj:
-				index_top_ = -2 * torch.ones(3).to(a.device)
-				triplet_a.append(-1)
-			else:
-				a_top_, index_top_ = a_j.topk(3)
-				reco_triplet_index_j = reco_triplet_index[j]
-				if (reco_triplet_index_j >= 0).all(): # if matched to a triplet
-					triplet_a.append(a_j[reco_triplet_index_j].sum().item()) # get total attention over the triplet
-				else:
-					triplet_a.append(-1)
-				# a_top.append(a_top_)
-			index_top.append(index_top_)
-		return torch.stack(index_top, dim=0), torch.FloatTensor(triplet_a), torch.FloatTensor(kl), torch.LongTensor(n_object)
-
-	
 	def get_alpha(self):
 		# get cached attention scores
 		# return torch.cat([self.pre_decoder.get_alpha(), self.covariant_decoder.get_alpha()], dim=1) # (|E|, 1 + L, H)

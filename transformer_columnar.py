@@ -184,21 +184,17 @@ class AttentionPooling(nn.Module):
         
         # Define the attention mechanism (a simple linear layer)
         self.attention_nn1 = nn.Linear(hidden_dim, 1)
-        self.attention_nn2 = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
         # Assuming x is of shape [batch_size, 2 * hidden_dim]
-        x1, x2 = torch.split(x, self.hidden_dim, dim=1)
         
         # Compute attention scores
-        attention_score1 = torch.sigmoid(self.attention_nn1(x1))  # shape: [batch_size, 1]
-        attention_score2 = torch.sigmoid(self.attention_nn2(x2))  # shape: [batch_size, 1]
+        attention_score1 = torch.sigmoid(self.attention_nn1(x))  # shape: [batch_size, 1]
         
         # Apply attention scores to the respective tensors
-        attended_x1 = attention_score1 * x1  # shape: [batch_size, hidden_dim]
-        attended_x2 = attention_score2 * x2  # shape: [batch_size, hidden_dim]
+        attended_x1 = attention_score1 * x  # shape: [batch_size, hidden_dim]
         
         # Pool the information by summing 
-        pooled_output = attended_x1 + attended_x2  # shape: [batch_size, hidden_dim])
+        pooled_output = torch.sum(attended_x1, axis=1)  # shape: [batch_size, hidden_dim])
         
         return pooled_output
