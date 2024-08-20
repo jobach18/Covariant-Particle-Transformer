@@ -87,7 +87,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 	
 	def forward(self, input, inference=False, force_correct_num_pred=False):
 		x = input.to(self.device)
-		batch_size = len(x) + 1
+		batch_size = len(x) 
 		############ encoder ############
 		# assume x = [pT, eta, phi, m, ...one-hot...]
 		p, x = x[:, 1:3], torch.cat([x[:, 0].unsqueeze(-1), x[:, 3:]], dim=-1) 
@@ -108,16 +108,16 @@ class ColumnarCovariantTopFormer(BaseModel):
 		# lstm readouts
 		x_key = self.readout_key_nn(x_source)
 		x_value = self.readout_value_nn(x_source)
-		x_out = self.readout(x_key, x_value, h,)
+		x_out = self.readout(x_key, x_value, h, batch_size)
 		x_out = x_out.reshape(batch_size * self.max_num_output, self.hidden_dim) # (N * 4, H)
 		# print(f'lstm x_out: {x_out.abs().mean()}\n', x_out[:, -5:]) # __debug__
 
 		# compute number of perdictions
-		if not inference or force_correct_num_pred:
-			num_pred = input['num_target'].to(self.device)
-			assert (num_pred <= self.max_num_output).all(), 'Too many targets'
-		else:
-			num_pred = torch.argmax(count_logits, axis=1) + 1
+		#if not inference or force_correct_num_pred:
+		#	num_pred = input['num_target'].to(self.device)
+		#	assert (num_pred <= self.max_num_output).all(), 'Too many targets'
+		#else:
+		num_pred = torch.tensor([2]).repeat(batch_size)
 
 		############ decoder ############
 
@@ -532,21 +532,26 @@ class Set2Set(torch.nn.Module):
 	def reset_parameters(self):
 		self.lstm.reset_parameters()
 
-	def forward(self, k, v, h, batch):
+	def forward(self, k, v, h, batch_size):
 		""""""
-		batch_size = batch.max().item() + 1
+		batch_size = batch_size
+		h = h.view(batch_size, 1)
+		h = h.repeat(1, batch_size)
+		h = h.unsqueeze(0)
 		h = (h.view((self.num_layers, batch_size, self.in_channels)),
-			 h.view((self.num_layers, batch_size, self.in_channels)))
+	   		 h.view((self.num_layers, batch_size, self.in_channels)))
 		q_star = v.new_zeros(batch_size, self.out_channels)
 		q = v.new_zeros(batch_size, self.in_channels)
 		readouts = []
 
 		for i in range(self.num_outputs):
+			print(q_star.unsqueeze(0).shape)
+			#print(h.shape)
 			q, h = self.lstm(q_star.unsqueeze(0), h) # updates querie and hidden state
 			q = q.view(batch_size, self.in_channels)
-			e = (k * q[batch]).sum(dim=-1, keepdim=True)
+			e = (k * q).sum(dim=-1, keepdim=True)
 			a = F.softmax(e) # attend over input
-			r = scatter_add(a * v, batch, dim=0, dim_size=batch_size) # readout
+			r = (a * v) # readout
 			readouts.append(r)
 			q_star = torch.cat([q, r], dim=-1)
 		readout = torch.cat(readouts, dim=-1)

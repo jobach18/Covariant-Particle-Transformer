@@ -59,8 +59,6 @@ class CovariantAttention(torch.nn.Module):
 		p = None
 		m_x = m
 		m_p = None
-		print(m_x.shape)
-		print(x.shape)
 
 
 		if self.gate:
