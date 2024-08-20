@@ -9,8 +9,8 @@ from torch.nn import Sequential, Linear, LeakyReLU, Dropout, LayerNorm, Identity
 from typing import Optional
 import torch
 from torch import Tensor
-from torch_scatter import scatter_mean
-from torch_geometric.nn.inits import zeros, ones
+#from torch_scatter import scatter_mean
+#from torch_geometric.nn.inits import zeros, ones
 import utils
 from covariant_attention import CovariantAttention
 
@@ -21,7 +21,7 @@ def zero_init_weights(m):
         m.bias.data.fill_(0)
 
 def gate_linear_init_weights(m):
-    if isinstance(m, nn.Linear)
+    if isinstance(m, nn.Linear):
         torch.nn.init.zeros_(m.weight)
         m.bias.data.fill_(1)
 
@@ -30,7 +30,7 @@ def gate_linear_init_weights(m):
 class TransformerEncoderBlock(torch.nn.Module):
 	def __init__(self, hidden_dim, heads,  dropout=0., update_p=False, d_space=3, uniform_attention=False):
 		super().__init__()
-		self.self_attn = ResidualSelfAttention(hidden_dim, heads, edge_dim, dropout=dropout, geometric=geometric, update_p=update_p, d_space=d_space, uniform_attention=uniform_attention)
+		self.self_attn = ResidualSelfAttention(hidden_dim, heads, dropout=dropout, update_p=update_p, d_space=d_space, uniform_attention=uniform_attention)
 		self.feedforward = ResidualFeedForward(hidden_dim, dropout=dropout)
 		
 	def forward(self, x, p):
@@ -48,9 +48,9 @@ class TransformerEncoder(torch.nn.Module):
 		self.uniform_attention = uniform_attention
 		self.input_embedding = MLP(in_dim, hidden_dim, hidden_dim, dropout, normalize_input=False)
 		self.d_space = d_space
-		self.encoder_blocks = nn.ModuleList([TransformerEncoderBlock(hidden_dim=hidden_dim, heads=heads, edge_dim=edge_dim, dropout=dropout, geometric=geometric, update_p=update_p, d_space=d_space, uniform_attention=uniform_attention) for i in range(self.num_convs)])
+		self.encoder_blocks = nn.ModuleList([TransformerEncoderBlock(hidden_dim=hidden_dim, heads=heads, dropout=dropout,  update_p=update_p, d_space=d_space, uniform_attention=uniform_attention) for i in range(self.num_convs)])
 
-	def forward(self, x, edge_index, edge_attr, p=None):
+	def forward(self, x, p=None):
 		x = self.input_embedding(x)
 		for _ in range(self.recycle + 1):
 			for encoder_block in self.encoder_blocks:
@@ -67,9 +67,9 @@ class TransformerDecoderBlock(torch.nn.Module):
 		self.get_alpha = self.cross_attn.get_alpha
 		self.get_phi_message_norm = self.cross_attn.get_phi_message_norm
 
-	def forward(self, x_source, p_source, x_out, p_out, self_edge_index, self_edge_attr, cross_edge_index, cross_edge_attr):
-		x_out, p_out = self.self_attn(x_out, p_out, self_edge_index, self_edge_attr)
-		x_out, p_out = self.cross_attn(x_source, p_source, x_out, p_out, cross_edge_index, cross_edge_attr)
+	def forward(self, x_source, p_source, x_out, p_out):
+		x_out, p_out = self.self_attn(x_out, p_out)
+		x_out, p_out = self.cross_attn(x_source, p_source, x_out, p_out)
 		x_out = self.feedforward(x_out)
 		return x_out, p_out
 
@@ -136,7 +136,7 @@ class ResidualSelfAttention(torch.nn.Module):
 		self.uniform_attention = uniform_attention
 		self.conv = CovariantAttention(hidden_dim, heads=heads, dropout=dropout, update_p=update_p, d_space=d_space, uniform_attention=self.uniform_attention)
 
-	def forward(self, x, p, edge_index, edge_attr):
+	def forward(self, x, p):
 		x_normed = self.norm_conv(x)
 		in_feat = x_normed
 		m_x, p = self.conv(in_feat)
@@ -179,7 +179,7 @@ class ResidualCrossAttentionBlock(torch.nn.Module):
 
 class AttentionPooling(nn.Module):
     def __init__(self, hidden_dim):
-        super(AttentionPooling, self).__init__()
+        super().__init__()
         self.hidden_dim = hidden_dim
         
         # Define the attention mechanism (a simple linear layer)

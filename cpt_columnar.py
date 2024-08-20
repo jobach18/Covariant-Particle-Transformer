@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Sequential, Linear, LeakyReLU, Dropout, LayerNorm
-from torch_scatter import scatter_add
-from torch_geometric.utils import softmax
+#from torch_scatter import scatter_add
+#from torch_geometric.utils import softmax
 from transformer_columnar import TransformerEncoder, TransformerDecoder, MLP, AttentionPooling
 from base_model import BaseModel
 import matplotlib.pyplot as plt
@@ -40,19 +40,19 @@ class ColumnarCovariantTopFormer(BaseModel):
 		self.dim_labels = utils.get_plot_configs(detector=True)[0]
 		self.pi = 3.1415926
 		
-    def define_modules(self):
-        self.invariant_encoder = TransformerEncoder(in_dim=self.in_dim - 2, hidden_dim=self.hidden_dim, num_convs=self.num_convs[0], heads=self.heads, dropout=self.dropout, geometric=self.geometric, update_p=False, d_space=self.d_space, uniform_attention=self.uniform_attention)
-        self.pre_decoder = TransformerDecoder(in_dim=self.hidden_dim, hidden_dim=self.hidden_dim, num_convs=1, heads=self.heads, dropout=self.dropout, geometric=False)
-        self.covariant_decoder = TransformerDecoder(in_dim=self.hidden_dim, hidden_dim=self.hidden_dim, num_convs=self.num_convs[1], heads=self.heads, dropout=self.dropout, geometric=self.geometric, update_p=True, d_space=self.d_space, uniform_attention=self.uniform_attention)
-        self.out_linear = Linear(self.hidden_dim, 2) # pT and mass
-        self.pool_attn_nn = Sequential(LayerNorm(self.hidden_dim), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim), LeakyReLU(), Dropout(self.dropout), Linear(self.hidden_dim, 1))
-        self.pool_value_nn = Sequential(LayerNorm(self.hidden_dim), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim), LeakyReLU(), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim))
+	def define_modules(self):
+		self.invariant_encoder = TransformerEncoder(in_dim=self.in_dim - 2, hidden_dim=self.hidden_dim, num_convs=self.num_convs[0], heads=self.heads, dropout=self.dropout, update_p=False, d_space=self.d_space, uniform_attention=self.uniform_attention)
+		self.pre_decoder = TransformerDecoder(in_dim=self.hidden_dim, hidden_dim=self.hidden_dim, num_convs=1, heads=self.heads, dropout=self.dropout)
+		self.covariant_decoder = TransformerDecoder(in_dim=self.hidden_dim, hidden_dim=self.hidden_dim, num_convs=self.num_convs[1], heads=self.heads, dropout=self.dropout, update_p=True, d_space=self.d_space, uniform_attention=self.uniform_attention)
+		self.out_linear = Linear(self.hidden_dim, 2) # pT and mass
+		self.pool_attn_nn = Sequential(LayerNorm(self.hidden_dim), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim), LeakyReLU(), Dropout(self.dropout), Linear(self.hidden_dim, 1))
+		self.pool_value_nn = Sequential(LayerNorm(self.hidden_dim), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim), LeakyReLU(), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim))
 		#don't use the graph attention but pool by another sequential MLP
-        self.pool =AttentionPooling(self.hidden_dim) 
-        self.readout_key_nn = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, self.dropout, normalize_input=True)
-        self.readout_value_nn = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, self.dropout, normalize_input=True)
-        self.readout = Set2Set(in_channels=self.hidden_dim, num_outputs=self.max_num_output, num_layers=1)
-        self.count_logits_nn = Sequential(LayerNorm(self.hidden_dim), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim), LeakyReLU(), Dropout(self.dropout), Linear(self.hidden_dim, self.max_num_output))
+		self.pool = AttentionPooling(self.hidden_dim) 
+		self.readout_key_nn = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, self.dropout, normalize_input=True)
+		self.readout_value_nn = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, self.dropout, normalize_input=True)
+		self.readout = Set2Set(in_channels=self.hidden_dim, num_outputs=self.max_num_output, num_layers=1)
+		self.count_logits_nn = Sequential(LayerNorm(self.hidden_dim), Dropout(self.dropout), Linear(self.hidden_dim, self.hidden_dim), LeakyReLU(), Dropout(self.dropout), Linear(self.hidden_dim, self.max_num_output))
 
 
 	def angle_to_vec(self, p):
@@ -87,7 +87,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 	
 	def forward(self, input, inference=False, force_correct_num_pred=False):
 		x = input.to(self.device)
-		batch_size = batch.max() + 1
+		batch_size = len(x) + 1
 		############ encoder ############
 		# assume x = [pT, eta, phi, m, ...one-hot...]
 		p, x = x[:, 1:3], torch.cat([x[:, 0].unsqueeze(-1), x[:, 3:]], dim=-1) 
@@ -108,7 +108,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 		# lstm readouts
 		x_key = self.readout_key_nn(x_source)
 		x_value = self.readout_value_nn(x_source)
-		x_out = self.readout(x_key, x_value, h, batch)
+		x_out = self.readout(x_key, x_value, h,)
 		x_out = x_out.reshape(batch_size * self.max_num_output, self.hidden_dim) # (N * 4, H)
 		# print(f'lstm x_out: {x_out.abs().mean()}\n', x_out[:, -5:]) # __debug__
 

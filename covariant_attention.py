@@ -1,19 +1,25 @@
 import math
 from typing import Union, Tuple, Optional
 from torch_geometric.typing import PairTensor, Adj, OptTensor
-
+import torch.nn as nn
 import torch
 from torch import Tensor
 import torch.nn.functional as F
 from torch.nn import Linear
-from torch_geometric.utils import softmax
+#from torch_geometric.utils import softmax
+from torch.nn import Sequential, Dropout, Linear, Sigmoid
 
-class CovariantAttention():
+def gate_linear_init_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.zeros_(m.weight)
+        m.bias.data.fill_(1)
+
+class CovariantAttention(torch.nn.Module):
 	def __init__(self, hidden_dim: int,
 				 heads: int = 1, gate: bool = True,
 				 dropout: float = 0.,
 				 bias: bool = True, d_space=3, update_p=False, uniform_attention=False, **kwargs):
-
+		super().__init__()
 		self.hidden_dim = hidden_dim
 		self.heads = heads
 		self.gate = gate
@@ -41,21 +47,21 @@ class CovariantAttention():
 		if self.gate:
 			self.gate_nn.apply(gate_linear_init_weights) # w = 0, b = 1
 
-	def forward(self, x: Union[Tensor, PairTensor],
-				edge_attr: OptTensor = None):
+	def forward(self, x):
 	
-		if isinstance(x, Tensor):
-			in_feat: PairTensor = (x, x)
-		else:
-			in_feat = x
+	
+		in_feat = x
 
 		# propagate_type: (x: PairTensor, edge_attr: OptTensor)
-		m = self.calc_attention(x=in_feat) # aggreagated messgaes 
+		m = self.calc_attention(x_i=in_feat) # aggreagated messgaes 
 		m = m.contiguous().view(-1, self.hidden_dim) # (|E|, D)
-        x = in_feat[1] # initial target feat
-        p = None
-        m_x = m
-        m_p = None
+		x = in_feat # initial target feat
+		p = None
+		m_x = m
+		m_p = None
+		print(m_x.shape)
+		print(x.shape)
+
 
 		if self.gate:
 			m_x = self.gate_nn(torch.cat([x, m_x], dim=-1)) * m_x
@@ -104,17 +110,17 @@ class CovariantAttention():
 		p21 = torch.cat([eta21.view(-1, 1), phi21], dim=-1)
 		return p21
 
-	def calc_attention(self, x_i) -> Tensor:
+	def calc_attention(self, x_i):
 
 		query = self.lin_query(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
-        key = self.lin_key(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
-        value = self.lin_value(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
+		key = self.lin_key(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
+		value = self.lin_value(x_i).view(-1, self.heads, self.hidden_dim // self.heads)
 
 		if not self.uniform_attention:
-			alpha = (query * key).sum(dim=-1) / math.sqrt(self.hidden_dim // self.heads) + edge_bias
+			alpha = (query * key).sum(dim=-1) / math.sqrt(self.hidden_dim // self.heads) 
 		else:
 			alpha = torch.zeros(query.shape[0], query.shape[1]).to(query.device)
-		alpha = softmax(alpha, dim=-1)
+		alpha = F.softmax(alpha, dim=-1)
 		self._alpha = alpha
 
 		m = value * alpha.view(-1, self.heads, 1) # invariant messages (|E|, H, D // H)
