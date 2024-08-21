@@ -162,7 +162,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 			print('y_pred has NAN')
 			raise SystemExit
 		
-		return y_pred, count_logits
+		return y_pred[:,:,:4 ], count_logits
 	
 	def normalize_phi_vec(self, p, eps=1e-4):
 		phi_vec = p[:, 1:]
