@@ -104,7 +104,6 @@ class ColumnarCovariantTopFormer(BaseModel):
 		
 		# logits for number of tops prediction
 		count_logits = self.count_logits_nn(h)
-		
 		# lstm readouts
 		x_key = self.readout_key_nn(x_source)
 		x_value = self.readout_value_nn(x_source)
@@ -131,12 +130,12 @@ class ColumnarCovariantTopFormer(BaseModel):
 		# pre-decoder cross attntion
 		x_out, _ = self.pre_decoder(x_source, x_out) # update x_out, p_out == None because pre_decoder is non-geometric
 		# retrieve invariant attention
-		print(f'psource is {p_source.shape}')
+		#print(f'psource is {p_source.shape}')
 		alpha_init = self.pre_decoder.get_alpha() # (|E|, L=1, H)
 		alpha_init = alpha_init.mean(-1).mean(-1) # average over layer and heads
 
 		# weight p_source[i, j] by a_[i, j]
-		print(alpha_init[:batch_size].shape)
+		#print(alpha_init[:batch_size].shape)
 		p_out = p_source * alpha_init[:batch_size].unsqueeze(-1) # (|E|, d_space) * (|E|, 1) -> (|E|, d_space)
 		# sum over source index
 		self.y_intermediates = []
@@ -162,6 +161,7 @@ class ColumnarCovariantTopFormer(BaseModel):
 		if y_pred.isnan().sum() > 0:
 			print('y_pred has NAN')
 			raise SystemExit
+		
 		return y_pred, count_logits
 	
 	def normalize_phi_vec(self, p, eps=1e-4):
@@ -547,7 +547,7 @@ class Set2Set(torch.nn.Module):
 		readouts = []
 
 		for i in range(self.num_outputs):
-			print(q_star.unsqueeze(0).shape)
+			#print(q_star.unsqueeze(0).shape)
 			#print(h.shape)
 			q, h = self.lstm(q_star.unsqueeze(0), h) # updates querie and hidden state
 			q = q.view(batch_size, self.in_channels)
