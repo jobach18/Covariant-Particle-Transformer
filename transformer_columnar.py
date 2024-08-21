@@ -171,7 +171,7 @@ class ResidualCrossAttentionBlock(torch.nn.Module):
 	def forward(self, x_source, p_source, x_out, p_out):
 		x_normed_source = self.norm_conv_source(x_source)
 		x_normed_out = self.norm_conv_out(x_out)
-		in_feat = torch.cat([x_normed_source, x_normed_out], axis=-1)
+		in_feat = x_normed_out
 		m_x_out, p_out = self.conv(in_feat) # not using edge attr
 		x_out = x_out + m_x_out
 		return x_out, p_out

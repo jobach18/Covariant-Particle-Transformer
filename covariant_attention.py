@@ -47,7 +47,7 @@ class CovariantAttention(torch.nn.Module):
 		if self.gate:
 			self.gate_nn.apply(gate_linear_init_weights) # w = 0, b = 1
 
-	def forward(self, x):
+	def forward(self, x, handle_p=True):
 	
 	
 		in_feat = x
@@ -59,8 +59,15 @@ class CovariantAttention(torch.nn.Module):
 		p = None
 		m_x = m
 		m_p = None
-
-
+		if handle_p:
+			p = in_feat[:, :self.d_space]
+			m_p = m 
+			m_p = self.gate_nn(torch.cat([x, m_x], dim=-1)) * m_p
+			eta = p[:, 0] + m_p[:, 0]
+			phi = self.rotate(p[:, 1:], m_p[:, 1:], inverse=False)
+			p = torch.cat([eta.view(-1, 1), phi], dim=-1)
+			# normalize again to prevent accumulation of numerical error
+			p = self.normalize_phi_vec(p)
 		if self.gate:
 			m_x = self.gate_nn(torch.cat([x, m_x], dim=-1)) * m_x
 
@@ -119,6 +126,7 @@ class CovariantAttention(torch.nn.Module):
 		else:
 			alpha = torch.zeros(query.shape[0], query.shape[1]).to(query.device)
 		alpha = F.softmax(alpha, dim=-1)
+		#print(f'alpha is {alpha}')
 		self._alpha = alpha
 
 		m = value * alpha.view(-1, self.heads, 1) # invariant messages (|E|, H, D // H)

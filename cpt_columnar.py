@@ -131,14 +131,16 @@ class ColumnarCovariantTopFormer(BaseModel):
 		# pre-decoder cross attntion
 		x_out, _ = self.pre_decoder(x_source, x_out) # update x_out, p_out == None because pre_decoder is non-geometric
 		# retrieve invariant attention
+		print(f'psource is {p_source.shape}')
 		alpha_init = self.pre_decoder.get_alpha() # (|E|, L=1, H)
 		alpha_init = alpha_init.mean(-1).mean(-1) # average over layer and heads
 
 		# weight p_source[i, j] by a_[i, j]
-		p_out = p_source * alpha_init.unsqueeze(-1) # (|E|, d_space) * (|E|, 1) -> (|E|, d_space)
+		print(alpha_init[:batch_size].shape)
+		p_out = p_source * alpha_init[:batch_size].unsqueeze(-1) # (|E|, d_space) * (|E|, 1) -> (|E|, d_space)
 		# sum over source index
 		self.y_intermediates = []
-		y_init = utils.format_prediction(x_out[:, :2], p_out)
+		y_init = utils.format_prediction(x_out[:batch_size, :2], p_out[:batch_size])
 		self.y_intermediates.append(y_init)
 
 		# normalize the phi-vector
